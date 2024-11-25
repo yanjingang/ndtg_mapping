@@ -49,14 +49,15 @@ int main(int argc, char **argv)
 {
   ros::init(argc, argv, "queue_counter");
 
-  ros::NodeHandle nh;
+  ros::NodeHandle nh("~");
   std::string lidar_topic = "/points_raw";
   std::string map_topic = "/ndtg/map";
   nh.getParam("lidar_topic", lidar_topic);
   nh.getParam("map_topic", map_topic);
 
-  ros::Subscriber points_sub = nh.subscribe(lidar_topic, 100000, points_callback);
-  ros::Subscriber ndt_map_sub = nh.subscribe(map_topic, 100000, ndt_map_callback);
+  ros::NodeHandle n;
+  ros::Subscriber points_sub = n.subscribe(lidar_topic, 100000, points_callback);
+  ros::Subscriber ndt_map_sub = n.subscribe(map_topic, 100000, ndt_map_callback);
 
   ros::spin();
 
