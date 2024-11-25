@@ -144,8 +144,6 @@ static std::string _map_topic = "/ndtg/map";
 static std::string _pose_topic = "/ndtg/current_pose";
 static std::string _gps_path_topic = "/gps/path";
 
-
-static double _filter_resolution = 2.0;
 static std::string _save_pcd_path = "~/autoware_shared_dir/bag/map-6-park/pcd/";
 
 static double fitness_score;
@@ -853,9 +851,9 @@ static void points_callback(const sensor_msgs::PointCloud2::ConstPtr &input)
 /**
  * 保存点云地图
  */
-static void save_pcd(double filter_resolution, const std::string &filename)
+static void save_pcd(double leaf_size, const std::string &filename)
 {
-  std::cout << "filter_resolution: " << filter_resolution << std::endl;
+  std::cout << "leaf_size: " << leaf_size << std::endl;
   std::cout << "filename: " << filename << std::endl;
 
   pcl::PointCloud<pcl::PointXYZI>::Ptr map_ptr(new pcl::PointCloud<pcl::PointXYZI>(map));
@@ -865,7 +863,7 @@ static void save_pcd(double filter_resolution, const std::string &filename)
   sensor_msgs::PointCloud2::Ptr map_msg_ptr(new sensor_msgs::PointCloud2);
 
   // Apply voxelgrid filter
-  if (filter_resolution == 0.0)
+  if (leaf_size == 0.0)
   {
     std::cout << "Original: " << map_ptr->points.size() << " points." << std::endl;
     pcl::toROSMsg(*map_ptr, *map_msg_ptr);
@@ -873,7 +871,7 @@ static void save_pcd(double filter_resolution, const std::string &filename)
   else
   {
     pcl::VoxelGrid<pcl::PointXYZI> voxel_grid_filter;
-    voxel_grid_filter.setLeafSize(filter_resolution, filter_resolution, filter_resolution);
+    voxel_grid_filter.setLeafSize(leaf_size, leaf_size, leaf_size);
     voxel_grid_filter.setInputCloud(map_ptr);
     voxel_grid_filter.filter(*map_filtered);
     std::cout << "Original: " << map_ptr->points.size() << " points." << std::endl;
@@ -884,7 +882,7 @@ static void save_pcd(double filter_resolution, const std::string &filename)
   ndt_map_pub.publish(*map_msg_ptr);
 
   // Writing Point Cloud data to PCD file
-  if (filter_resolution == 0.0)
+  if (leaf_size == 0.0)
   {
     pcl::io::savePCDFileASCII(filename, *map_ptr);
     std::cout << "Saved " << map_ptr->points.size() << " data points to " << filename << "." << std::endl;
@@ -1011,7 +1009,6 @@ int main(int argc, char **argv)
   nh.getParam("map_topic", _map_topic);
   nh.getParam("pose_topic", _pose_topic);
   nh.getParam("gps_path_topic", _gps_path_topic);
-  nh.getParam("filter_resolution", _filter_resolution);
   nh.getParam("save_pcd_path", _save_pcd_path);
 
   std::cout << "lidar_topic: " << _lidar_topic << std::endl;
@@ -1040,7 +1037,6 @@ int main(int argc, char **argv)
   std::cout << "map_topic: " << _map_topic << std::endl;
   std::cout << "pose_topic: " << _pose_topic << std::endl;
   std::cout << "gps_path_topic: " << _gps_path_topic << std::endl;
-  std::cout << "filter_resolution: " << _filter_resolution << std::endl;
   std::cout << "save_pcd_path: " << _save_pcd_path << std::endl;
 
   // Set log file name.
@@ -1114,7 +1110,7 @@ int main(int argc, char **argv)
 
   // 保存pcd文件
   std::string pcd_file = _save_pcd_path + "ndtg_map_" + std::string(buffer) + ".pcd";
-  save_pcd(_filter_resolution, pcd_file);
+  save_pcd(voxel_leaf_size, pcd_file);
 
   return 0;
 }

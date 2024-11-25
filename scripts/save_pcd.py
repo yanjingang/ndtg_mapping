@@ -19,7 +19,7 @@ class SavePcd:
     def __init__(self):
         self.topic = "/ndtg/map"
         self.save_path = None
-        self.filter_resolution = 2.0
+        self.leaf_size = 1.0
         self.save_count = 0
 
     def save_pcd(self, msg):
@@ -27,9 +27,9 @@ class SavePcd:
         print("save_pcd start ", filename)
 
         cloud = pcl.PointCloud(np.array(list(pc2.read_points(msg)), dtype=np.float32)[:, 0:3])
-        if self.filter_resolution > 0.0:
+        if self.leaf_size > 0.0:
             sor = cloud.make_voxel_grid_filter()
-            sor.set_leaf_size(self.filter_resolution, self.filter_resolution, self.filter_resolution)
+            sor.set_leaf_size(self.leaf_size, self.leaf_size, self.leaf_size)
             cloud_filtered = sor.filter()
             cloud_filtered.to_file(filename.encode())
         else:

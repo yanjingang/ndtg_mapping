@@ -32,7 +32,6 @@
   <arg name="map_topic" default="/ndtg/map" />
   <arg name="pose_topic" default="/ndtg/current_pose" />
   <arg name="gps_path_topic" default="/gps/path" />
-  <arg name="filter_resolution" default="2.0" />
   <arg name="save_pcd_path" default="/home/work/autoware_shared_dir/bag/map-6-park/pcd/" />
 
   <!-- ndtg_mapping  -->
@@ -68,7 +67,6 @@
     <param name="map_topic" value="$(arg map_topic)" />
     <param name="pose_topic" value="$(arg pose_topic)" />
     <param name="gps_path_topic" value="$(arg gps_path_topic)" />
-    <param name="filter_resolution" value="$(arg filter_resolution)" />
     <param name="save_pcd_path" value="$(arg save_pcd_path)" />
   </node>
 
