@@ -56,6 +56,7 @@
 #include <tf2_ros/transform_broadcaster.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.h>
 #include <visualization_msgs/Marker.h>
+#include <pcl/common/transforms.h>
 
 struct pose
 {
@@ -71,7 +72,7 @@ struct pose
 };
 
 // global variables
-static pose previous_pose, guess_pose, guess_pose_imu, guess_pose_odom, guess_pose_imu_odom, current_pose,
+static pose previous_pose, guess_pose, guess_pose_imu, guess_pose_odom, guess_pose_imu_odom, guess_pose_gps, current_pose,
     current_pose_imu, current_pose_odom, current_pose_imu_odom, ndt_pose, added_pose, localizer_pose;
 
 static ros::Time current_scan_time;
@@ -157,7 +158,7 @@ static nav_msgs::Odometry odom;
 static std::ofstream ofs;
 static std::string filename;
 
-// // gps path pub
+// gps path pub
 double rad(double d)
 {
   return d * 3.1415926 / 180.0;
@@ -169,6 +170,12 @@ nav_msgs::Path ros_path;
 bool init;
 pose init_pose;
 pose last_pose;
+
+// data cache
+#include <deque>
+std::deque<sensor_msgs::PointCloud2> cloudQueue;
+double lastGpsTime = -1;
+uint64_t gps_count = 0;
 
 // 发布gps path的tf变换
 void publishTFFrames(const geometry_msgs::PoseStamped &current_position)
@@ -203,77 +210,48 @@ void publishTFFrames(const geometry_msgs::PoseStamped &current_position)
 }
 
 /**
- * gps数据处理
+ * 保存点云地图
  */
-static void gps_callback(const sensor_msgs::NavSatFix::Ptr &msg)
+static void save_pcd(double leaf_size, const std::string &filename)
 {
-  ROS_INFO("--------------------- %s ---------------------", __func__);
-  if (!init)
+  std::cout << "leaf_size: " << leaf_size << std::endl;
+  std::cout << "filename: " << filename << std::endl;
+
+  pcl::PointCloud<pcl::PointXYZI>::Ptr map_ptr(new pcl::PointCloud<pcl::PointXYZI>(map));
+  pcl::PointCloud<pcl::PointXYZI>::Ptr map_filtered(new pcl::PointCloud<pcl::PointXYZI>());
+  map_ptr->header.frame_id = "map";
+  map_filtered->header.frame_id = "map";
+  sensor_msgs::PointCloud2::Ptr map_msg_ptr(new sensor_msgs::PointCloud2);
+
+  // Apply voxelgrid filter
+  if (leaf_size == 0.0)
   {
-    ROS_INFO("init");
-    init_pose.latitude = msg->latitude;
-    init_pose.longitude = msg->longitude;
-    init_pose.altitude = msg->altitude;
-    init = true;
+    std::cout << "Original: " << map_ptr->points.size() << " points." << std::endl;
+    pcl::toROSMsg(*map_ptr, *map_msg_ptr);
   }
   else
   {
-    ROS_INFO("calc rad pos");
-    // 计算相对源点偏移位置
-    double radLat1, radLat2, radLong1, radLong2, delta_lat, delta_long, x, y;
-    radLat1 = rad(init_pose.latitude);
-    radLong1 = rad(init_pose.longitude);
-    radLat2 = rad(msg->latitude);
-    radLong2 = rad(msg->longitude);
-    // 计算x
-    delta_lat = radLat2 - radLat1;
-    delta_long = 0;
-    if (delta_lat > 0)
-      x = -2 * asin(sqrt(pow(sin(delta_lat / 2), 2) + cos(radLat1) * cos(radLat2) * pow(sin(delta_long / 2), 2)));
-    else
-      x = 2 * asin(sqrt(pow(sin(delta_lat / 2), 2) + cos(radLat1) * cos(radLat2) * pow(sin(delta_long / 2), 2)));
-    x = x * EARTH_RADIUS * 1000;
+    pcl::VoxelGrid<pcl::PointXYZI> voxel_grid_filter;
+    voxel_grid_filter.setLeafSize(leaf_size, leaf_size, leaf_size);
+    voxel_grid_filter.setInputCloud(map_ptr);
+    voxel_grid_filter.filter(*map_filtered);
+    std::cout << "Original: " << map_ptr->points.size() << " points." << std::endl;
+    std::cout << "Filtered: " << map_filtered->points.size() << " points." << std::endl;
+    pcl::toROSMsg(*map_filtered, *map_msg_ptr);
+  }
 
-    // 计算y
-    delta_lat = 0;
-    delta_long = radLong2 - radLong1;
-    if (delta_long > 0)
-      y = 2 * asin(sqrt(pow(sin(delta_lat / 2), 2) + cos(radLat2) * cos(radLat2) * pow(sin(delta_long / 2), 2)));
-    else
-      y = -2 * asin(sqrt(pow(sin(delta_lat / 2), 2) + cos(radLat2) * cos(radLat2) * pow(sin(delta_long / 2), 2)));
-    y = y * EARTH_RADIUS * 1000;
+  ndt_map_pub.publish(*map_msg_ptr);
 
-    // 计算z
-    double z = msg->altitude - init_pose.altitude;
-
-    // 发布轨迹
-    // 更新当前位置
-    geometry_msgs::PoseStamped current_position;
-    current_position.header.frame_id = "path";
-    current_position.header.stamp = ros::Time::now();
-    current_position.pose.position.x = x;
-    current_position.pose.position.y = y;
-    current_position.pose.position.z = z;
-
-    publishTFFrames(current_position);
-    ros_path.header.frame_id = "path";
-    ros_path.header.stamp = ros::Time::now();
-    geometry_msgs::PoseStamped pose;
-    pose.header = ros_path.header;
-    pose.pose.position.x = x;
-    pose.pose.position.y = y;
-    pose.pose.position.z = z;
-    ros_path.poses.push_back(pose);
-
-    gps_path_pub.publish(ros_path);
-    ROS_INFO("GPS Path: %0.6f ,%0.6f ,%0.6f  Move: %0.6f ,%0.6f ,%0.6f", x, y, z, x - last_pose.x, y - last_pose.y, z - last_pose.z);
-
-    last_pose.x = x;
-    last_pose.y = y;
-    last_pose.z = z;
-    last_pose.latitude = msg->latitude;
-    last_pose.longitude = msg->longitude;
-    last_pose.altitude = msg->altitude;
+  // Writing Point Cloud data to PCD file
+  if (leaf_size == 0.0)
+  {
+    pcl::io::savePCDFileASCII(filename, *map_ptr);
+    std::cout << "Saved " << map_ptr->points.size() << " data points to " << filename << "." << std::endl;
+  }
+  else
+  {
+    pcl::io::savePCDFileASCII(filename, *map_filtered);
+    std::cout << "Saved " << map_filtered->points.size() << " data points to " << filename << "." << std::endl;
   }
 }
 
@@ -284,13 +262,13 @@ static void gps_callback(const sensor_msgs::NavSatFix::Ptr &msg)
 static void imu_odom_calc(ros::Time current_time)
 {
   static ros::Time previous_time = current_time;
-  double diff_time = (current_time - previous_time).toSec();  // 两帧间的时间差
+  double diff_time = (current_time - previous_time).toSec(); // 两帧间的时间差
   // imu在该时间差内的角速度变化量
   double diff_imu_roll = imu.angular_velocity.x * diff_time;
   double diff_imu_pitch = imu.angular_velocity.y * diff_time;
   double diff_imu_yaw = imu.angular_velocity.z * diff_time;
 
-  current_pose_imu_odom.roll += diff_imu_roll;  // 累加变化量
+  current_pose_imu_odom.roll += diff_imu_roll; // 累加变化量
   current_pose_imu_odom.pitch += diff_imu_pitch;
   current_pose_imu_odom.yaw += diff_imu_yaw;
   // 里程计在diff_time时间内x轴上变化距离
@@ -323,7 +301,7 @@ static void imu_odom_calc(ros::Time current_time)
 static void odom_calc(ros::Time current_time)
 {
   static ros::Time previous_time = current_time;
-  double diff_time = (current_time - previous_time).toSec();  // 获取前后两帧时间差
+  double diff_time = (current_time - previous_time).toSec(); // 获取前后两帧时间差
   // 计算两帧间隔内的里程计旋转角度
   double diff_odom_roll = odom.twist.twist.angular.x * diff_time;
   double diff_odom_pitch = odom.twist.twist.angular.y * diff_time;
@@ -359,14 +337,14 @@ static void odom_calc(ros::Time current_time)
  */
 static void imu_calc(ros::Time current_time)
 {
-  static ros::Time previous_time = current_time;  //获取上一帧时间
-  double diff_time = (current_time - previous_time).toSec();  //计算前后两帧的时间差
+  static ros::Time previous_time = current_time;             // 获取上一帧时间
+  double diff_time = (current_time - previous_time).toSec(); // 计算前后两帧的时间差
 
-  double diff_imu_roll = imu.angular_velocity.x * diff_time;  //计算在diff_time中角速度的变化量
+  double diff_imu_roll = imu.angular_velocity.x * diff_time; // 计算在diff_time中角速度的变化量
   double diff_imu_pitch = imu.angular_velocity.y * diff_time;
   double diff_imu_yaw = imu.angular_velocity.z * diff_time;
 
-  current_pose_imu.roll += diff_imu_roll; //当前位置的旋转角度
+  current_pose_imu.roll += diff_imu_roll; // 当前位置的旋转角度
   current_pose_imu.pitch += diff_imu_pitch;
   current_pose_imu.yaw += diff_imu_yaw;
 
@@ -391,7 +369,7 @@ static void imu_calc(ros::Time current_time)
   offset_imu_y += current_velocity_imu_y * diff_time + accY * diff_time * diff_time / 2.0;
   offset_imu_z += current_velocity_imu_z * diff_time + accZ * diff_time * diff_time / 2.0;
   // 当前的速度增量
-  current_velocity_imu_x += accX * diff_time; //加速度乘以两帧的时间差
+  current_velocity_imu_x += accX * diff_time; // 加速度乘以两帧的时间差
   current_velocity_imu_y += accY * diff_time;
   current_velocity_imu_z += accZ * diff_time;
   // offset_imu变化角度=两帧时间内的变化角度
@@ -406,6 +384,11 @@ static void imu_calc(ros::Time current_time)
   guess_pose_imu.roll = previous_pose.roll + offset_imu_roll;
   guess_pose_imu.pitch = previous_pose.pitch + offset_imu_pitch;
   guess_pose_imu.yaw = previous_pose.yaw + offset_imu_yaw;
+
+  // ROS_INFO("IMU CALC XYZ: %0.6f ,%0.6f ,%0.6f  Offset: %0.6f ,%0.6f ,%0.6f Diff: %0.6f ,%0.6f ,%0.6f"
+  //   , guess_pose_imu.x, guess_pose_imu.y, guess_pose_imu.z, offset_imu_x, offset_imu_y, offset_imu_z, current_velocity_imu_x * diff_time + accX * diff_time * diff_time / 2.0, current_velocity_imu_y * diff_time + accY * diff_time * diff_time / 2.0, current_velocity_imu_z * diff_time + accZ * diff_time * diff_time / 2.0);
+  // ROS_INFO("IMU CALC RPY: %0.6f ,%0.6f ,%0.6f  Offset: %0.6f ,%0.6f ,%0.6f Diff: %0.6f ,%0.6f ,%0.6f"
+  //   , guess_pose_imu.roll, guess_pose_imu.pitch, guess_pose_imu.yaw, offset_imu_roll, offset_imu_pitch, offset_imu_yaw, diff_imu_roll, diff_imu_pitch, diff_imu_yaw);
 
   previous_time = current_time;
 }
@@ -439,7 +422,7 @@ static double calcDiffForRadian(const double lhs_rad, const double rhs_rad)
  */
 static void odom_callback(const nav_msgs::Odometry::ConstPtr &input)
 {
-  ROS_INFO("--------------------- %s ---------------------", __func__);
+  // ROS_INFO("--------------------- %s ---------------------", __func__);
 
   odom = *input;
   odom_calc(input->header.stamp); // 用来计算ndt配准时需要的初始化坐标
@@ -503,20 +486,20 @@ static void imu_callback(const sensor_msgs::Imu::Ptr &input)
   imu.linear_acceleration.y = 0;
   imu.linear_acceleration.z = 0;
 
-  if (diff_time != 0) //如果这个微小的时间diff_time不为0，则Imu保持工作状态
+  if (diff_time != 0) // 如果这个微小的时间diff_time不为0，则Imu保持工作状态
   {
     imu.angular_velocity.x = diff_imu_roll / diff_time; // 计算imu的瞬时角速度
     imu.angular_velocity.y = diff_imu_pitch / diff_time;
     imu.angular_velocity.z = diff_imu_yaw / diff_time;
   }
-  else  //如果微小的时间为0的话，imu的角速度为0
+  else // 如果微小的时间为0的话，imu的角速度为0
   {
     imu.angular_velocity.x = 0;
     imu.angular_velocity.y = 0;
     imu.angular_velocity.z = 0;
   }
 
-  imu_calc(input->header.stamp); //利用imu_calc计算位置初值，为ndt提供初始位置
+  imu_calc(input->header.stamp); // 利用imu_calc计算位置初值，为ndt提供初始位置
 
   previous_time = current_time; // 更新前一帧时间
   previous_imu_roll = imu_roll;
@@ -531,17 +514,17 @@ static void imu_callback(const sensor_msgs::Imu::Ptr &input)
 static void points_callback(const sensor_msgs::PointCloud2::ConstPtr &input)
 {
   ROS_INFO("--------------------- %s ---------------------", __func__);
-  double r;         // 表示激光点云到激光雷达的距离,主要是用于滤除距离车体较近或者较远的点云
-  pcl::PointXYZI p; // 表示原始激光点云的点对象
-  pcl::PointCloud<pcl::PointXYZI> tmp, scan;  //temp表示临时的原始点云数据，scan表示滤除距离激光雷达过近或者过远的点云数据
+  double r;                                  // 表示激光点云到激光雷达的距离,主要是用于滤除距离车体较近或者较远的点云
+  pcl::PointXYZI p;                          // 表示原始激光点云的点对象
+  pcl::PointCloud<pcl::PointXYZI> tmp, scan; // temp表示临时的原始点云数据，scan表示滤除距离激光雷达过近或者过远的点云数据
   pcl::PointCloud<pcl::PointXYZI>::Ptr filtered_scan_ptr(new pcl::PointCloud<pcl::PointXYZI>());
   pcl::PointCloud<pcl::PointXYZI>::Ptr transformed_scan_ptr(new pcl::PointCloud<pcl::PointXYZI>());
   tf::Quaternion q;
 
-  Eigen::Matrix4f t_localizer(Eigen::Matrix4f::Identity()); //激光雷达相对于map的变换矩阵
-  Eigen::Matrix4f t_base_link(Eigen::Matrix4f::Identity()); //车体相对于map的变换矩阵
-  static tf::TransformBroadcaster br; //声明一个tf发布者br
-  tf::Transform transform;  //声明一个变换对象transform
+  Eigen::Matrix4f t_localizer(Eigen::Matrix4f::Identity()); // 激光雷达相对于map的变换矩阵
+  Eigen::Matrix4f t_base_link(Eigen::Matrix4f::Identity()); // 车体相对于map的变换矩阵
+  static tf::TransformBroadcaster br;                       // 声明一个tf发布者br
+  tf::Transform transform;                                  // 声明一个变换对象transform
 
   current_scan_time = input->header.stamp; // 获取当前点云扫描时间
 
@@ -580,23 +563,25 @@ static void points_callback(const sensor_msgs::PointCloud2::ConstPtr &input)
   }
 
   // 对原始输入点云进行体素过滤 Apply voxelgrid filter
+  std::cout << "Apply voxelgrid filter: size=" << scan_ptr->size() << " width=" << scan_ptr->width << " height=" << scan_ptr->height << " leaf_size=" << voxel_leaf_size << std::endl;
   pcl::VoxelGrid<pcl::PointXYZI> voxel_grid_filter;
   voxel_grid_filter.setLeafSize(voxel_leaf_size, voxel_leaf_size, voxel_leaf_size);
   voxel_grid_filter.setInputCloud(scan_ptr);
-  voxel_grid_filter.filter(*filtered_scan_ptr); //结果保存至filtered_scan_ptr
+  voxel_grid_filter.filter(*filtered_scan_ptr); // 结果保存至filtered_scan_ptr
+  std::cout << "Apply voxelgrid filter done." << std::endl;
 
   pcl::PointCloud<pcl::PointXYZI>::Ptr map_ptr(new pcl::PointCloud<pcl::PointXYZI>(map));
   // 进行ndt参数设置
-  ndt.setTransformationEpsilon(trans_eps);  //表示在ndt中，平移向量和旋转向量的临界递增量，收敛条件
+  ndt.setTransformationEpsilon(trans_eps); // 表示在ndt中，平移向量和旋转向量的临界递增量，收敛条件
   ndt.setStepSize(step_size);
   ndt.setResolution(resolution);
   ndt.setMaximumIterations(max_iter);
-  ndt.setInputSource(filtered_scan_ptr);  //设置输入点云是上面过滤掉的filtered_scan_ptr
+  ndt.setInputSource(filtered_scan_ptr); // 设置输入点云是上面过滤掉的filtered_scan_ptr
 
-  static bool is_first_map = true;  //将第一张地图map_ptr设置输入ndt输入点云
+  static bool is_first_map = true; // 将第一张地图map_ptr设置输入ndt输入点云
   if (is_first_map == true)
   {
-    ndt.setInputTarget(map_ptr);  //全局地图初始化之后，将map_ptr作为输入目标点云，而源点云为每一次接收到的降采样过滤原始点云filtered_scan_ptr
+    ndt.setInputTarget(map_ptr); // 全局地图初始化之后，将map_ptr作为输入目标点云，而源点云为每一次接收到的降采样过滤原始点云filtered_scan_ptr
     is_first_map = false;
   }
 
@@ -611,10 +596,10 @@ static void points_callback(const sensor_msgs::PointCloud2::ConstPtr &input)
   guess_pose.pitch = previous_pose.pitch;
   guess_pose.yaw = previous_pose.yaw + diff_yaw;
 
-  //选择使用初值的计算方法
-  if (_use_imu == true && _use_odom == true)  // imu+odom
+  // 选择使用初值的计算方法
+  if (_use_imu == true && _use_odom == true) // imu+odom
     imu_odom_calc(current_scan_time);
-  if (_use_imu == true && _use_odom == false) // 仅imu 
+  if (_use_imu == true && _use_odom == false) // 仅imu
     imu_calc(current_scan_time);
   if (_use_imu == false && _use_odom == true) // 仅里程计
     odom_calc(current_scan_time);
@@ -627,7 +612,7 @@ static void points_callback(const sensor_msgs::PointCloud2::ConstPtr &input)
   else if (_use_imu == false && _use_odom == true)
     guess_pose_for_ndt = guess_pose_odom;
   else
-    guess_pose_for_ndt = guess_pose;  //未使用里程计或者imu则使用guess_pose
+    guess_pose_for_ndt = guess_pose; // 未使用里程计或者imu则使用guess_pose
 
   // 利用guess_pose_for_ndt的位姿旋转量来初始化xyz轴的旋转向量
   Eigen::AngleAxisf init_rotation_x(guess_pose_for_ndt.roll, Eigen::Vector3f::UnitX());
@@ -647,11 +632,11 @@ static void points_callback(const sensor_msgs::PointCloud2::ConstPtr &input)
   pcl::PointCloud<pcl::PointXYZI>::Ptr output_cloud(new pcl::PointCloud<pcl::PointXYZI>);
 
   // 4.进行ndt配准
-  ndt.align(*output_cloud, init_guess);       //以init_guess作为初始值迭代优化，将配准结果存入outout_cloud
-  fitness_score = ndt.getFitnessScore();      //目标点云与源点云之间的欧式聚类作为适应分数
-  t_localizer = ndt.getFinalTransformation(); //通过ndt得到最终激光雷达相对于map的变化矩阵
-  has_converged = ndt.hasConverged();         //判断是否收敛
-  final_num_iteration = ndt.getFinalNumIteration(); //得到最终迭代次数
+  ndt.align(*output_cloud, init_guess);             // 以init_guess作为初始值迭代优化，将配准结果存入outout_cloud
+  fitness_score = ndt.getFitnessScore();            // 目标点云与源点云之间的欧式聚类作为适应分数
+  t_localizer = ndt.getFinalTransformation();       // 通过ndt得到最终激光雷达相对于map的变化矩阵
+  has_converged = ndt.hasConverged();               // 判断是否收敛
+  final_num_iteration = ndt.getFinalNumIteration(); // 得到最终迭代次数
   transformation_probability = ndt.getTransformationProbability();
 
   // 首先求出车体相对于原点的变换矩阵t_base_link
@@ -659,8 +644,8 @@ static void points_callback(const sensor_msgs::PointCloud2::ConstPtr &input)
   // 将原始点云经过ndt变换之后输出为转换点云
   pcl::transformPointCloud(*scan_ptr, *transformed_scan_ptr, t_localizer);
 
-  tf::Matrix3x3 mat_l, mat_b; //前者和后者分别表示激光雷达和车体相对于map的旋转矩阵
-  //赋值操作
+  tf::Matrix3x3 mat_l, mat_b; // 前者和后者分别表示激光雷达和车体相对于map的旋转矩阵
+  // 赋值操作
   mat_l.setValue(static_cast<double>(t_localizer(0, 0)), static_cast<double>(t_localizer(0, 1)),
                  static_cast<double>(t_localizer(0, 2)), static_cast<double>(t_localizer(1, 0)),
                  static_cast<double>(t_localizer(1, 1)), static_cast<double>(t_localizer(1, 2)),
@@ -677,7 +662,7 @@ static void points_callback(const sensor_msgs::PointCloud2::ConstPtr &input)
   localizer_pose.x = t_localizer(0, 3);
   localizer_pose.y = t_localizer(1, 3);
   localizer_pose.z = t_localizer(2, 3);
-  //通过mat_l.getRPY()来设置localizer_pose的旋转rpy角度
+  // 通过mat_l.getRPY()来设置localizer_pose的旋转rpy角度
   mat_l.getRPY(localizer_pose.roll, localizer_pose.pitch, localizer_pose.yaw, 1);
 
   // 5.将ndt配准的位置作为当前位置，并且以当前位置设置坐标系，并发布坐标变换信息。
@@ -686,7 +671,7 @@ static void points_callback(const sensor_msgs::PointCloud2::ConstPtr &input)
   ndt_pose.z = t_base_link(2, 3);
   mat_b.getRPY(ndt_pose.roll, ndt_pose.pitch, ndt_pose.yaw, 1);
   // 将此时的ndt_pose作为当前时刻的位姿current_pose
-  current_pose.x = ndt_pose.x; 
+  current_pose.x = ndt_pose.x;
   current_pose.y = ndt_pose.y;
   current_pose.z = ndt_pose.z;
   current_pose.roll = ndt_pose.roll;
@@ -772,7 +757,8 @@ static void points_callback(const sensor_msgs::PointCloud2::ConstPtr &input)
 
   // 计算added_pose与当前位姿之间的距离，added_pose为上一帧的车辆位姿，主要用于判断是否需要更新地图 Calculate the shift between added_pos and current_pos
   double shift = sqrt(pow(current_pose.x - added_pose.x, 2.0) + pow(current_pose.y - added_pose.y, 2.0));
-  if (shift >= min_add_scan_shift)  //满足条件，将transformed_scan_ptr加入到map,完成拼接
+  // 如果当前帧和上一帧的平移超过了min_add_scan_shift_,那么更新地图,并更新previous帧,发布地图。 否则,previous帧不变
+  if (shift >= min_add_scan_shift) // 满足条件，将transformed_scan_ptr加入到map,完成拼接
   {
     map += *transformed_scan_ptr;
     added_pose.x = current_pose.x;
@@ -781,13 +767,17 @@ static void points_callback(const sensor_msgs::PointCloud2::ConstPtr &input)
     added_pose.roll = current_pose.roll;
     added_pose.pitch = current_pose.pitch;
     added_pose.yaw = current_pose.yaw;
-    //最后将当前拼接后的点云数据map_ptr设置为下一次配准的输入目标点云
+    // 最后将当前拼接后的点云数据map_ptr设置为下一次配准的输入目标点云
+    std::cout << " set ndt map: size=" << map_ptr->size() << " width=" << map_ptr->width << " height=" << map_ptr->height << " resolution=" << resolution << std::endl;
     ndt.setInputTarget(map_ptr);
+    std::cout << " set ndt map done." << std::endl;
   }
 
-  sensor_msgs::PointCloud2::Ptr map_msg_ptr(new sensor_msgs::PointCloud2);  //声明ROS可用的点云类型
-  pcl::toROSMsg(*map_ptr, *map_msg_ptr);  //将map_ptr -> map_msg_ptr
-  ndt_map_pub.publish(*map_msg_ptr);  //发布出去
+  std::cout << " pub ndt map: shift=" << shift << " min_add_scan_shift=" << min_add_scan_shift << std::endl;
+  sensor_msgs::PointCloud2::Ptr map_msg_ptr(new sensor_msgs::PointCloud2); // 声明ROS可用的点云类型
+  pcl::toROSMsg(*map_ptr, *map_msg_ptr);                                   // 将map_ptr -> map_msg_ptr
+  ndt_map_pub.publish(*map_msg_ptr);                                       // 发布出去
+  std::cout << " pub ndt map done." << std::endl;
 
   q.setRPY(current_pose.roll, current_pose.pitch, current_pose.yaw);
   current_pose_msg.header.frame_id = "map";
@@ -799,7 +789,6 @@ static void points_callback(const sensor_msgs::PointCloud2::ConstPtr &input)
   current_pose_msg.pose.orientation.y = q.y();
   current_pose_msg.pose.orientation.z = q.z();
   current_pose_msg.pose.orientation.w = q.w();
-
   current_pose_pub.publish(current_pose_msg);
 
   // Write log
@@ -829,7 +818,7 @@ static void points_callback(const sensor_msgs::PointCloud2::ConstPtr &input)
       << min_scan_range << ","
       << max_scan_range << ","
       << min_add_scan_shift << std::endl;
-  //以上，是为了配准地图map并生成ros消息发布出去
+  // 以上，是为了配准地图map并生成ros消息发布出去
   std::cout << "-----------------------------------------------------------------" << std::endl;
   std::cout << "Sequence number: " << input->header.seq << std::endl;
   std::cout << "Number of scan points: " << scan_ptr->size() << " points." << std::endl;
@@ -848,50 +837,176 @@ static void points_callback(const sensor_msgs::PointCloud2::ConstPtr &input)
   std::cout << "-----------------------------------------------------------------" << std::endl;
 }
 
-/**
- * 保存点云地图
- */
-static void save_pcd(double leaf_size, const std::string &filename)
+void transformPointCloudToGPS(const pcl::PointCloud<pcl::PointXYZI>::Ptr &cloud, double lon, double lat, double alt)
 {
-  std::cout << "leaf_size: " << leaf_size << std::endl;
-  std::cout << "filename: " << filename << std::endl;
+  // 创建一个4x4的变换矩阵
+  Eigen::Affine3f transform = Eigen::Affine3f::Identity();
 
-  pcl::PointCloud<pcl::PointXYZI>::Ptr map_ptr(new pcl::PointCloud<pcl::PointXYZI>(map));
-  pcl::PointCloud<pcl::PointXYZI>::Ptr map_filtered(new pcl::PointCloud<pcl::PointXYZI>());
-  map_ptr->header.frame_id = "map";
-  map_filtered->header.frame_id = "map";
-  sensor_msgs::PointCloud2::Ptr map_msg_ptr(new sensor_msgs::PointCloud2);
+  // 平移
+  transform.translation() << lon, lat, alt;
 
-  // Apply voxelgrid filter
-  if (leaf_size == 0.0)
+  // 执行坐标转换
+  pcl::transformPointCloud(*cloud, *cloud, transform);
+}
+
+/**
+ * 缓存points数据，供rtk采样用
+ */
+static void cache_points(const sensor_msgs::PointCloud2::ConstPtr &laserCloudMsg)
+{
+  ROS_INFO("--------------------- %s ---------------------", __func__);
+  // cache point cloud
+  cloudQueue.push_back(*laserCloudMsg);
+
+  // 清除最后rtk时间之前的缓存点云
+  if (lastGpsTime == -1)
+    return;
+  while (!cloudQueue.empty())
   {
-    std::cout << "Original: " << map_ptr->points.size() << " points." << std::endl;
-    pcl::toROSMsg(*map_ptr, *map_msg_ptr);
+    if (cloudQueue.front().header.stamp.toSec() <= lastGpsTime)
+    {
+      ROS_INFO("clear old cloud data %f <= %f", cloudQueue.front().header.stamp.toSec(), lastGpsTime);
+      cloudQueue.pop_front();
+    }
+    else
+    {
+      break;
+    }
+  }
+}
+
+/**
+ * gps数据处理
+ */
+static void gps_callback(const sensor_msgs::NavSatFix::Ptr &msg)
+{
+  ROS_INFO("--------------------- %s ---------------------", __func__);
+
+  if (!init)
+  {
+    ROS_INFO("init");
+    init_pose.latitude = msg->latitude;
+    init_pose.longitude = msg->longitude;
+    init_pose.altitude = msg->altitude;
+    init = true;
+    guess_pose_gps = guess_pose_imu;
   }
   else
   {
-    pcl::VoxelGrid<pcl::PointXYZI> voxel_grid_filter;
-    voxel_grid_filter.setLeafSize(leaf_size, leaf_size, leaf_size);
-    voxel_grid_filter.setInputCloud(map_ptr);
-    voxel_grid_filter.filter(*map_filtered);
-    std::cout << "Original: " << map_ptr->points.size() << " points." << std::endl;
-    std::cout << "Filtered: " << map_filtered->points.size() << " points." << std::endl;
-    pcl::toROSMsg(*map_filtered, *map_msg_ptr);
+    ROS_INFO("Start GPS Path");
+    // 计算相对源点偏移位置
+    double radLat1, radLat2, radLong1, radLong2, delta_lat, delta_long, x, y;
+    radLat1 = rad(init_pose.latitude);
+    radLong1 = rad(init_pose.longitude);
+    radLat2 = rad(msg->latitude);
+    radLong2 = rad(msg->longitude);
+    // 计算x
+    delta_lat = radLat2 - radLat1;
+    delta_long = 0;
+    if (delta_lat > 0)
+      x = -2 * asin(sqrt(pow(sin(delta_lat / 2), 2) + cos(radLat1) * cos(radLat2) * pow(sin(delta_long / 2), 2)));
+    else
+      x = 2 * asin(sqrt(pow(sin(delta_lat / 2), 2) + cos(radLat1) * cos(radLat2) * pow(sin(delta_long / 2), 2)));
+    x = x * EARTH_RADIUS * 1000;
+
+    // 计算y
+    delta_lat = 0;
+    delta_long = radLong2 - radLong1;
+    if (delta_long > 0)
+      y = 2 * asin(sqrt(pow(sin(delta_lat / 2), 2) + cos(radLat2) * cos(radLat2) * pow(sin(delta_long / 2), 2)));
+    else
+      y = -2 * asin(sqrt(pow(sin(delta_lat / 2), 2) + cos(radLat2) * cos(radLat2) * pow(sin(delta_long / 2), 2)));
+    y = y * EARTH_RADIUS * 1000;
+
+    // 计算z
+    double z = msg->altitude - init_pose.altitude;
+
+    // 发布轨迹
+    geometry_msgs::PoseStamped current_position; // 更新当前位置
+    current_position.header.frame_id = "path";
+    current_position.header.stamp = ros::Time::now();
+    current_position.pose.position.x = x;
+    current_position.pose.position.y = y;
+    current_position.pose.position.z = z;
+    publishTFFrames(current_position);
+    ros_path.header.frame_id = "path";
+    ros_path.header.stamp = ros::Time::now();
+    geometry_msgs::PoseStamped pose;
+    pose.header = ros_path.header;
+    pose.pose.position.x = x;
+    pose.pose.position.y = y;
+    pose.pose.position.z = z;
+    ros_path.poses.push_back(pose);
+    gps_path_pub.publish(ros_path);
+
+    last_pose.x = x;
+    last_pose.y = y;
+    last_pose.z = z;
+    last_pose.latitude = msg->latitude;
+    last_pose.longitude = msg->longitude;
+    last_pose.altitude = msg->altitude;
+    ROS_INFO("GPS Path: %0.6f ,%0.6f ,%0.6f  Move: %0.6f ,%0.6f ,%0.6f", x, y, z, x - last_pose.x, y - last_pose.y, z - last_pose.z);
+
+    ROS_INFO("Start GPS Points %ld %f", gps_count, msg->header.stamp.toSec());
+    while (!cloudQueue.empty())
+    {
+      // 只使用与rtk时间最近的一帧点云数据（rtk是5hz，lidar是20hz，发送间隔分别为200ms和50ms，因此这里取50ms误差范围内的）
+      double gap_time = msg->header.stamp.toSec() - cloudQueue.front().header.stamp.toSec();
+      if (std::abs(gap_time) <= 0.05)
+      {
+        ROS_INFO("GPS found near cloud data: %ld %f-%f=%f", gps_count, msg->header.stamp.toSec(), cloudQueue.front().header.stamp.toSec(), msg->header.stamp.toSec() - cloudQueue.front().header.stamp.toSec());
+
+        // 获取并清理缓存中的点云数据
+        sensor_msgs::PointCloud2::ConstPtr currentCloudMsg(new sensor_msgs::PointCloud2(std::move(cloudQueue.front())));
+        cloudQueue.pop_front();
+
+        // 将当前点云pcl消息类型转化为ros类型
+        pcl::PointCloud<pcl::PointXYZI> tmp;
+        pcl::fromROSMsg(*currentCloudMsg, tmp);
+        pcl::PointCloud<pcl::PointXYZI>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZI>(tmp));
+        // pcl::PointCloud<pcl::PointXYZI>::Ptr transformed_scan_ptr(new pcl::PointCloud<pcl::PointXYZI>());
+
+        // 将点云坐标转换到GPS坐标系下，假设经度为110.0，纬度为30.0，海拔为0.0
+        // transformPointCloudToGPS(cloud, msg->longitude, msg->latitude, msg->altitude);
+        // transformPointCloudToGPS(cloud, x, y, z);
+
+        // 打印转换后的点云坐标
+        // for (const auto &point : cloud->points)
+        // {
+        //   ROS_INFO("GPS Coordinates: (%f,%f,%f)", point.x, point.y, point.z);
+        // }
+        points_callback(currentCloudMsg);
+
+        // 保存到地图缓存
+        // pcl::transformPointCloud(*cloud, *transformed_scan_ptr, tf_btol);
+        // map += *transformed_scan_ptr;
+        // map += *cloud;
+        ROS_INFO("GPS Pints Map size %ld", map.size());
+
+        // 自动保存一次地图到pcd文件
+        if (gps_count % 50 == 0) // 5hz，每10s
+        {
+          std::string pcd_file = _save_pcd_path + "ndtg_map_" + std::to_string(msg->header.stamp.toSec()) + ".pcd";
+          save_pcd(voxel_leaf_size, pcd_file);
+          ROS_INFO("GPS Pints Map save %ld %ld %s", gps_count, map.size(), pcd_file.c_str());
+        }
+
+        // break;
+      }
+      else if (gap_time < 0) // 遇到更新的数据，直接跳出
+      {
+        break;
+      }
+      else // 旧的过期数据清理掉
+      {
+        // ROS_INFO("clear old cloud data %f", cloudQueue.front().header.stamp.toSec());
+        cloudQueue.pop_front();
+      }
+    }
   }
 
-  ndt_map_pub.publish(*map_msg_ptr);
-
-  // Writing Point Cloud data to PCD file
-  if (leaf_size == 0.0)
-  {
-    pcl::io::savePCDFileASCII(filename, *map_ptr);
-    std::cout << "Saved " << map_ptr->points.size() << " data points to " << filename << "." << std::endl;
-  }
-  else
-  {
-    pcl::io::savePCDFileASCII(filename, *map_filtered);
-    std::cout << "Saved " << map_filtered->points.size() << " data points to " << filename << "." << std::endl;
-  }
+  gps_count++;
+  lastGpsTime = msg->header.stamp.toSec();
 }
 
 // 主函数入口
@@ -1084,11 +1199,11 @@ int main(int argc, char **argv)
     因此需要求的是map与base_link之间的坐标变换关系，这部分代码在下方if判断关系之后。
   */
   // 初始化平移向量tl_btol,激光雷达相对于车身底盘之间的的位置关系
-  Eigen::Translation3f tl_btol(_tf_x, _tf_y, _tf_z);                // tl: translation
-  Eigen::AngleAxisf rot_x_btol(_tf_roll, Eigen::Vector3f::UnitX()); // rot: rotation
-  Eigen::AngleAxisf rot_y_btol(_tf_pitch, Eigen::Vector3f::UnitY());  //初始化旋转向量，绕x,y,z旋转
+  Eigen::Translation3f tl_btol(_tf_x, _tf_y, _tf_z);                 // tl: translation
+  Eigen::AngleAxisf rot_x_btol(_tf_roll, Eigen::Vector3f::UnitX());  // rot: rotation
+  Eigen::AngleAxisf rot_y_btol(_tf_pitch, Eigen::Vector3f::UnitY()); // 初始化旋转向量，绕x,y,z旋转
   Eigen::AngleAxisf rot_z_btol(_tf_yaw, Eigen::Vector3f::UnitZ());
-  tf_btol = (tl_btol * rot_z_btol * rot_y_btol * rot_x_btol).matrix();  //这是autoware采用的zyx欧拉角旋转方式
+  tf_btol = (tl_btol * rot_z_btol * rot_y_btol * rot_x_btol).matrix(); // 这是autoware采用的zyx欧拉角旋转方式
   tf_ltob = tf_btol.inverse();
 
   map.header.frame_id = "map";
@@ -1099,7 +1214,7 @@ int main(int argc, char **argv)
   current_pose_pub = n.advertise<geometry_msgs::PoseStamped>(_pose_topic, 1000); // 发布位姿
   gps_path_pub = n.advertise<nav_msgs::Path>(_gps_path_topic, 10);
   // 订阅topic
-  ros::Subscriber points_sub = n.subscribe(_lidar_topic, 100000, points_callback);
+  ros::Subscriber points_sub = n.subscribe(_lidar_topic, 100000, cache_points); // points_callback
   ros::Subscriber odom_sub = n.subscribe(_odom_topic, 100000, odom_callback);
   ros::Subscriber imu_sub = n.subscribe(_imu_topic, 100000, imu_callback);
   ros::Subscriber gps_sub = n.subscribe(_gps_topic, 100000, gps_callback);

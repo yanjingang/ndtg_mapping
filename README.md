@@ -43,4 +43,7 @@ roslaunch ndtg_mapping run.launch
 rosbag play autoware-20241124082629.bag -r1
 
 ### 建图过程中导出PCD地图
-python3 ~/catkin_ndtg/src/ndtg_mapping/scripts/save_pcd.py /ndtg/map ~/autoware_shared_dir/bag/map-6-park/pc
+python3 ~/catkin_ndtg/src/ndtg_mapping/scripts/save_pcd.py /ndtg/map ~/autoware_shared_dir/bag/map-6-park/pcd
+
+
+

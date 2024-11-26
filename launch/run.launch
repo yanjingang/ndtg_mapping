@@ -1,5 +1,7 @@
 <!-- -->
 <launch>
+  <env name="ROSCONSOLE_CONFIG_FILE" value="$(find ndtg_mapping)/config/rosconsole.conf"/>
+  
   <!-- input params  -->
   <arg name="lidar_topic" default="/points_raw" />
   <arg name="imu_topic" default="/imu_raw" />
@@ -19,11 +21,11 @@
   <arg name="tf_pitch" default="0" />
   <arg name="tf_roll" default="0" />
 
-  <arg name="resolution" default="2.0" />
+  <arg name="resolution" default="1.0" />
   <arg name="step_size" default="0.1" />
   <arg name="trans_eps" default="0.01" />
   <arg name="max_iter" default="30" />
-  <arg name="voxel_leaf_size" default="1" />
+  <arg name="voxel_leaf_size" default="1.0" />
   <arg name="min_scan_range" default="0.15" />
   <arg name="max_scan_range" default="200" />
   <arg name="min_add_scan_shift" default="1" />
@@ -33,6 +35,18 @@
   <arg name="pose_topic" default="/ndtg/current_pose" />
   <arg name="gps_path_topic" default="/gps/path" />
   <arg name="save_pcd_path" default="/home/work/autoware_shared_dir/bag/map-6-park/pcd/" />
+
+  <!-- EKF GPS-->
+  <!-- <node pkg="robot_localization" type="ekf_localization_node" name="ekf_gps" respawn="true">
+      <remap from="odometry/filtered" to="odometry/navsat" />
+  </node> -->
+
+  <!-- Navsat -->
+  <!-- <node pkg="robot_localization" type="navsat_transform_node" name="navsat" respawn="true">
+      <remap from="imu_raw" to="imu_correct" />
+      <remap from="gps/fix" to="gps/fix" />
+      <remap from="odometry/filtered" to="odometry/navsat" />
+  </node> -->
 
   <!-- ndtg_mapping  -->
   <node pkg="ndtg_mapping" type="queue_counter" name="queue_counter" output="screen"/>

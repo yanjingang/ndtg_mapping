@@ -2,7 +2,7 @@
 # 自动定时保存ndt_mapping地图到pcd文件
 #   python3 save_pcd.py ${topic_name} ${save_path}
 #   python3 ~/catkin_ndtg/src/ndtg_mapping/scripts/save_pcd.py /ndtg/map ~/autoware_shared_dir/bag/map-6-park/pcd
-#       pcl_viewer ~/autoware_shared_dir/bag/map-6-park/pcd/pcd_1732540520.51428.pcd
+#       pcl_viewer ~/autoware_shared_dir/bag/map-6-park/pcd/ndtg_map_1732540520.51428.pcd
 
 import sys
 import os
@@ -19,11 +19,11 @@ class SavePcd:
     def __init__(self):
         self.topic = "/ndtg/map"
         self.save_path = None
-        self.leaf_size = 1.0
+        self.leaf_size = 2.0
         self.save_count = 0
 
     def save_pcd(self, msg):
-        filename = self.save_path + '/pcd' + '_' + "{:.5f}".format(time.time()) + '.pcd'
+        filename = self.save_path + '/ndtg_map_' + "{:.5f}".format(time.time()) + '.pcd'
         print("save_pcd start ", filename)
 
         cloud = pcl.PointCloud(np.array(list(pc2.read_points(msg)), dtype=np.float32)[:, 0:3])
